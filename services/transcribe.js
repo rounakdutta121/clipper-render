@@ -1,85 +1,149 @@
 const fs = require('fs');
+const axios = require('axios');
 const path = require('path');
-const https = require('https');
+const cloudinary = require('cloudinary').v2;
 
-const MAX_RETRIES = 3;
-const RETRY_DELAY = 2000;
-const TIMEOUT_MS = 120000;
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+const ASSEMBLYAI_BASE_URL = 'https://api.assemblyai.com/v2';
+const POLL_INTERVAL_MS = 3000;
+const MAX_POLL_TIME_MS = 120000;
 
 async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function transcribeAudio(audioPath) {
-  console.log('🎙️ Step 3: Transcribing audio with Whisper...');
-  console.log('   Audio file:', audioPath);
+async function uploadAudioToCloudinary(audioPath) {
+  console.log('   ☁️ Uploading audio to Cloudinary for AssemblyAI...');
 
-  let lastError;
+  try {
+    const result = await cloudinary.uploader.upload(audioPath, {
+      resource_type: 'video',
+      folder: 'ai-transcriptions',
+      public_id: `audio_${Date.now()}`,
+      format: 'mp3'
+    });
 
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    console.log('   ✅ Audio uploaded to Cloudinary');
+    console.log('   URL:', result.secure_url);
+
+    return result.secure_url;
+  } catch (error) {
+    console.error('   ❌ Failed to upload audio to Cloudinary:', error.message);
+    throw new Error(`Failed to upload audio: ${error.message}`);
+  }
+}
+
+async function createTranscription(audioUrl, apiKey) {
+  const response = await axios.post(
+    `${ASSEMBLYAI_BASE_URL}/transcript`,
+    { audio_url: audioUrl },
+    {
+      headers: {
+        'authorization': apiKey,
+        'content-type': 'application/json'
+      },
+      timeout: 30000
+    }
+  );
+
+  return response.data.id;
+}
+
+async function pollForResult(transcriptId, apiKey) {
+  console.log('   ⏳ Polling for transcription result...');
+
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < MAX_POLL_TIME_MS) {
     try {
-      if (attempt > 1) {
-        console.log(`   🔄 Retry ${attempt}/${MAX_RETRIES}...`);
-        await sleep(RETRY_DELAY * (attempt - 1));
+      const response = await axios.get(
+        `${ASSEMBLYAI_BASE_URL}/transcript/${transcriptId}`,
+        {
+          headers: { 'authorization': apiKey },
+          timeout: 10000
+        }
+      );
+
+      const result = response.data;
+
+      if (result.status === 'completed') {
+        console.log('   ✅ Transcription completed');
+        return result;
       }
 
-      const result = await transcribeWithRetry(audioPath);
-      
-      console.log('✅ Transcription completed');
-      console.log('   Duration:', result.duration?.toFixed(2), 'seconds');
-      console.log('   Segments:', result.segments?.length || 0);
+      if (result.status === 'error') {
+        throw new Error(`AssemblyAI error: ${result.error}`);
+      }
 
-      return result;
+      console.log(`   Status: ${result.status}... waiting...`);
+      await sleep(POLL_INTERVAL_MS);
 
     } catch (error) {
-      lastError = error;
-      console.error(`   ❌ Attempt ${attempt}/${MAX_RETRIES} failed:`, error.message);
-
-      if (attempt < MAX_RETRIES) {
-        const isRetryable = 
-          error.code === 'ECONNRESET' ||
-          error.code === 'ETIMEDOUT' ||
-          error.code === 'ECONNREFUSED' ||
-          error.message?.includes('timeout') ||
-          error.message?.includes('socket hang up') ||
-          error.message?.includes('network');
-
-        if (!isRetryable) {
-          console.error('   ⚠️ Non-retryable error, stopping retries');
-          break;
-        }
-      }
+      console.error('   ❌ Polling error:', error.message);
+      throw error;
     }
   }
 
-  console.error('❌ All transcription retries failed');
-  throw new Error(`Failed to transcribe audio after ${MAX_RETRIES} attempts: ${lastError.message}`);
+  throw new Error('Transcription polling timed out after 2 minutes');
 }
 
-async function transcribeWithRetry(audioPath) {
-  const { default: OpenAI } = await import('openai');
-  
-  const agent = new https.Agent({
-    keepAlive: true,
-    timeout: TIMEOUT_MS
-  });
+async function transcribeAudio(audioPath) {
+  console.log('🎙️ Step 3: Transcribing audio with AssemblyAI...');
+  console.log('   Audio file:', audioPath);
 
-  const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-    httpAgent: agent,
-    timeout: TIMEOUT_MS
-  });
+  const apiKey = process.env.ASSEMBLYAI_API_KEY;
 
-  const fileStream = fs.createReadStream(audioPath);
+  if (!apiKey) {
+    throw new Error('ASSEMBLYAI_API_KEY is not configured');
+  }
 
-  const transcription = await openai.audio.transcriptions.create({
-    file: fileStream,
-    model: 'whisper-1',
-    response_format: 'verbose_json',
-    timestamp_granularities: ['segment']
-  });
+  let cloudinaryUrl;
 
-  return transcription;
+  try {
+    cloudinaryUrl = await uploadAudioToCloudinary(audioPath);
+
+    console.log('   📡 Creating transcription task...');
+    const transcriptId = await createTranscription(cloudinaryUrl, apiKey);
+    console.log('   Transcript ID:', transcriptId);
+
+    const result = await pollForResult(transcriptId, apiKey);
+
+    console.log('   ✅ Transcription completed');
+    console.log('   Duration:', (result.audio_duration || 0).toFixed(2), 'seconds');
+
+    const words = result.words || [];
+    console.log('   Words:', words.length);
+
+    const segments = words.reduce((acc, word, idx, arr) => {
+      if (idx === 0 || word.start - arr[idx - 1].end > 1) {
+        acc.push({
+          start: word.start,
+          end: word.end,
+          text: word.text
+        });
+      } else {
+        const last = acc[acc.length - 1];
+        last.end = word.end;
+        last.text += ' ' + word.text;
+      }
+      return acc;
+    }, []);
+
+    return {
+      text: result.text,
+      duration: result.audio_duration,
+      segments: segments
+    };
+
+  } catch (error) {
+    console.error('❌ Transcription failed:', error.message);
+    throw new Error(`Failed to transcribe audio: ${error.message}`);
+  }
 }
 
 module.exports = { transcribeAudio };
