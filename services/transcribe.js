@@ -17,25 +17,38 @@ async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function uploadAudioToCloudinary(audioPath) {
-  console.log('   ☁️ Uploading audio to Cloudinary for AssemblyAI...');
+async function uploadAudioToAssemblyAI(audioPath, apiKey) {
+  console.log('   📤 Uploading audio directly to AssemblyAI...');
 
   try {
-    const result = await cloudinary.uploader.upload(audioPath, {
-      resource_type: 'auto',
-      folder: 'ai-transcriptions',
-      public_id: `audio_${Date.now()}`,
-      format: 'mp3',
-      use_filename: false,
-      unique_filename: true
-    });
+    const fileStream = fs.createReadStream(audioPath);
+    const stats = fs.statSync(audioPath);
+    const fileSize = stats.size;
 
-    console.log('   ✅ Audio uploaded to Cloudinary');
-    console.log('   URL:', result.secure_url);
+    const response = await axios.post(
+      `${ASSEMBLYAI_BASE_URL}/upload`,
+      fileStream,
+      {
+        headers: {
+          'authorization': apiKey,
+          'content-type': 'application/octet-stream'
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        timeout: 60000
+      }
+    );
 
-    return result.secure_url;
+    console.log('   ✅ Audio uploaded to AssemblyAI');
+    console.log('   Upload URL:', response.data.upload_url);
+
+    return response.data.upload_url;
   } catch (error) {
-    console.error('   ❌ Failed to upload audio to Cloudinary:', error.message);
+    if (error.response) {
+      console.error('   ❌ Upload failed:', error.response.data);
+      throw new Error(`AssemblyAI upload error: ${JSON.stringify(error.response.data)}`);
+    }
+    console.error('   ❌ Upload failed:', error.message);
     throw new Error(`Failed to upload audio: ${error.message}`);
   }
 }
@@ -61,7 +74,7 @@ async function createTranscription(audioUrl, apiKey) {
     return response.data.id;
   } catch (error) {
     if (error.response) {
-      console.error('   ❌ AssemblyAI 400 Error:', error.response.data);
+      console.error('   ❌ AssemblyAI Error:', JSON.stringify(error.response.data));
       throw new Error(`AssemblyAI error: ${JSON.stringify(error.response.data)}`);
     }
     throw error;
@@ -94,7 +107,8 @@ async function pollForResult(transcriptId, apiKey) {
         throw new Error(`AssemblyAI error: ${result.error}`);
       }
 
-      console.log(`   Status: ${result.status}... waiting...`);
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+      console.log(`   Status: ${result.status}... (${elapsed}s elapsed)`);
       await sleep(POLL_INTERVAL_MS);
 
     } catch (error) {
@@ -150,8 +164,8 @@ async function transcribeAudio(audioPath) {
   }
 
   try {
-    const cloudinaryUrl = await uploadAudioToCloudinary(audioPath);
-    const transcriptId = await createTranscription(cloudinaryUrl, apiKey);
+    const uploadUrl = await uploadAudioToAssemblyAI(audioPath, apiKey);
+    const transcriptId = await createTranscription(uploadUrl, apiKey);
     console.log('   Transcript ID:', transcriptId);
 
     const result = await pollForResult(transcriptId, apiKey);
