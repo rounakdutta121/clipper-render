@@ -1,7 +1,7 @@
 const path = require('path');
 const fs = require('fs-extra');
 const { downloadVideo } = require('./download');
-const { extractAudio } = require('./transcribe');
+const { extractAudio } = require('./extract');
 const { transcribeAudio } = require('./transcribe');
 const { analyzeTranscript } = require('./analyze');
 const { generateClips } = require('./clipper');
