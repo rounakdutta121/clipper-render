@@ -60,7 +60,10 @@ async function createTranscription(audioUrl, apiKey) {
   try {
     const response = await axios.post(
       `${ASSEMBLYAI_BASE_URL}/transcript`,
-      { audio_url: audioUrl },
+      { 
+        audio_url: audioUrl,
+        speech_model: 'universal-2'
+      },
       {
         headers: {
           'authorization': apiKey,
