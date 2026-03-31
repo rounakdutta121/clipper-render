@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: ai-video-clipper
+    env: node
+    region: oregon
+    plan: starter
+    buildCommand: npm install
+    startCommand: bash -c 'sudo apt-get update && sudo apt-get install -y ffmpeg && npm start'
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
