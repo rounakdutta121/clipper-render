@@ -62,7 +62,7 @@ async function createTranscription(audioUrl, apiKey) {
       `${ASSEMBLYAI_BASE_URL}/transcript`,
       { 
         audio_url: audioUrl,
-        speech_model: ['universal-2']
+        speech_models: ['universal-3-pro']
       },
       {
         headers: {
