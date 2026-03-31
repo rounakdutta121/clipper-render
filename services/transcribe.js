@@ -22,10 +22,12 @@ async function uploadAudioToCloudinary(audioPath) {
 
   try {
     const result = await cloudinary.uploader.upload(audioPath, {
-      resource_type: 'video',
+      resource_type: 'auto',
       folder: 'ai-transcriptions',
       public_id: `audio_${Date.now()}`,
-      format: 'mp3'
+      format: 'mp3',
+      use_filename: false,
+      unique_filename: true
     });
 
     console.log('   ✅ Audio uploaded to Cloudinary');
@@ -39,19 +41,31 @@ async function uploadAudioToCloudinary(audioPath) {
 }
 
 async function createTranscription(audioUrl, apiKey) {
-  const response = await axios.post(
-    `${ASSEMBLYAI_BASE_URL}/transcript`,
-    { audio_url: audioUrl },
-    {
-      headers: {
-        'authorization': apiKey,
-        'content-type': 'application/json'
-      },
-      timeout: 30000
-    }
-  );
+  console.log('   📡 Creating transcription task...');
+  console.log('   Audio URL:', audioUrl);
 
-  return response.data.id;
+  try {
+    const response = await axios.post(
+      `${ASSEMBLYAI_BASE_URL}/transcript`,
+      { audio_url: audioUrl },
+      {
+        headers: {
+          'authorization': apiKey,
+          'content-type': 'application/json'
+        },
+        timeout: 30000
+      }
+    );
+
+    console.log('   ✅ Transcription task created');
+    return response.data.id;
+  } catch (error) {
+    if (error.response) {
+      console.error('   ❌ AssemblyAI 400 Error:', error.response.data);
+      throw new Error(`AssemblyAI error: ${JSON.stringify(error.response.data)}`);
+    }
+    throw error;
+  }
 }
 
 async function pollForResult(transcriptId, apiKey) {
@@ -92,6 +106,39 @@ async function pollForResult(transcriptId, apiKey) {
   throw new Error('Transcription polling timed out after 2 minutes');
 }
 
+function buildSegmentsFromWords(words) {
+  if (!words || words.length === 0) return [];
+
+  const segments = [];
+  let currentSegment = null;
+
+  for (const word of words) {
+    if (!currentSegment) {
+      currentSegment = {
+        start: word.start / 1000,
+        end: word.end / 1000,
+        text: word.text
+      };
+    } else if (word.start / 1000 - currentSegment.end < 1) {
+      currentSegment.end = word.end / 1000;
+      currentSegment.text += ' ' + word.text;
+    } else {
+      segments.push(currentSegment);
+      currentSegment = {
+        start: word.start / 1000,
+        end: word.end / 1000,
+        text: word.text
+      };
+    }
+  }
+
+  if (currentSegment) {
+    segments.push(currentSegment);
+  }
+
+  return segments;
+}
+
 async function transcribeAudio(audioPath) {
   console.log('🎙️ Step 3: Transcribing audio with AssemblyAI...');
   console.log('   Audio file:', audioPath);
@@ -102,12 +149,8 @@ async function transcribeAudio(audioPath) {
     throw new Error('ASSEMBLYAI_API_KEY is not configured');
   }
 
-  let cloudinaryUrl;
-
   try {
-    cloudinaryUrl = await uploadAudioToCloudinary(audioPath);
-
-    console.log('   📡 Creating transcription task...');
+    const cloudinaryUrl = await uploadAudioToCloudinary(audioPath);
     const transcriptId = await createTranscription(cloudinaryUrl, apiKey);
     console.log('   Transcript ID:', transcriptId);
 
@@ -119,20 +162,7 @@ async function transcribeAudio(audioPath) {
     const words = result.words || [];
     console.log('   Words:', words.length);
 
-    const segments = words.reduce((acc, word, idx, arr) => {
-      if (idx === 0 || word.start - arr[idx - 1].end > 1) {
-        acc.push({
-          start: word.start,
-          end: word.end,
-          text: word.text
-        });
-      } else {
-        const last = acc[acc.length - 1];
-        last.end = word.end;
-        last.text += ' ' + word.text;
-      }
-      return acc;
-    }, []);
+    const segments = buildSegmentsFromWords(words);
 
     return {
       text: result.text,
